@@ -48,8 +48,8 @@ export default function STLToDrawingApp() {
   const [company, setCompany] = useState("");
   const [drawingName, setDrawingName] = useState("");
   const [dimensions, setDimensions] = useState({ width: true, height: true, depth: true });
-  const [views, setViews] = useState({ front: true, top: false, side: false });
-  const [projectionType, setProjectionType] = useState("third"); // "first" or "third"
+  const [views, setViews] = useState({ front: true, top: false, sideRight: false, sideLeft: false });
+  const [projectionType, setProjectionType] = useState("first"); // "first" (ISO) or "third" (ASME)
   const [stlDimensions, setStlDimensions] = useState(null);
   const [drawingDate] = useState(new Date().toLocaleDateString());
   const [geometry, setGeometry] = useState(null);
@@ -65,6 +65,8 @@ export default function STLToDrawingApp() {
   const [useManualScale, setUseManualScale] = useState(false);
   const [manualScale, setManualScale] = useState("1");
   const [rotation, setRotation] = useState({ x: 0, y: 0, z: 0 });
+  const [drawingOffset, setDrawingOffset] = useState({ x: 0, y: 0 });
+  const [isDraggingView, setIsDraggingView] = useState(false);
   const canvasRef = useRef(null);
   const offscreenCanvasRef = useRef(null);
   const previewCanvasRef = useRef(null);
@@ -72,6 +74,9 @@ export default function STLToDrawingApp() {
   const liveRotationRef = useRef({ x: 0, y: 0, z: 0 });
   const isDragging3DRef = useRef(false);
   const lastDragPos3DRef = useRef({ x: 0, y: 0 });
+  // Per-view drag state (refs to avoid re-renders during drag)
+  const viewBBoxesRef = useRef({});
+  const draggingViewRef = useRef(null); // { name, startX, startY, startOffsetX, startOffsetY }
 
   // A3 size in pixels at ~140 DPI for good quality (420mm × 297mm)
   const CANVAS_WIDTH = 1754;
@@ -82,7 +87,7 @@ export default function STLToDrawingApp() {
     if (geometry && stlDimensions) {
       draw2D(geometry, stlDimensions.width, stlDimensions.height, stlDimensions.depth);
     }
-  }, [annotations, tempPoints, zoom, panOffset, showAnnotations, useManualScale, manualScale, rotation]);
+  }, [annotations, tempPoints, zoom, panOffset, showAnnotations, useManualScale, manualScale, rotation, projectionType, drawingOffset]);
 
   // Recalculate auto-detected features when scale settings change
   useEffect(() => {
@@ -96,7 +101,7 @@ export default function STLToDrawingApp() {
       const detectedAnnotations = detectFeatures(rotGeom, bbox, rotWidth, rotHeight, rotDepth);
       setAnnotations(detectedAnnotations);
     }
-  }, [useManualScale, manualScale, views.front, views.top, views.side, rotation]);
+  }, [useManualScale, manualScale, views.front, views.top, views.sideRight, views.sideLeft, rotation]);
 
   // Sync liveRotationRef and redraw 3D preview whenever geometry or committed rotation changes
   useEffect(() => {
@@ -129,6 +134,8 @@ export default function STLToDrawingApp() {
       setAnnotations([]); // Clear annotations when new file is loaded
       setZoom(1);
       setPanOffset({ x: 0, y: 0 });
+      setDrawingOffset({ x: 0, y: 0 });
+      viewBBoxesRef.current = {};
       
       // Auto-detect features for annotations
       const autoAnnotations = detectFeatures(loadedGeometry, bbox, width, height, depth);
@@ -395,7 +402,26 @@ export default function STLToDrawingApp() {
 
   const handleMouseDown = (event) => {
     if (currentTool !== 'none') return;
-    if (event.button === 0 || event.button === 1) { // Left or middle mouse button
+    if (event.button === 0 || event.button === 1) {
+      // Check if click lands inside any view — drag all views together
+      const { x, y } = getCanvasCoordinates(event);
+      const overAnyView = ['front', 'top', 'sideRight', 'sideLeft'].some(vn => {
+        if (!views[vn]) return false;
+        const bbox = viewBBoxesRef.current[vn];
+        return bbox && x >= bbox.x && x <= bbox.x + bbox.w && y >= bbox.y && y <= bbox.y + bbox.h;
+      });
+      if (overAnyView) {
+        draggingViewRef.current = {
+          startX: x,
+          startY: y,
+          startOffsetX: drawingOffset.x,
+          startOffsetY: drawingOffset.y,
+        };
+        setIsDraggingView(true);
+        event.preventDefault();
+        return;
+      }
+      // Click was on empty sheet — pan the whole canvas
       setIsPanning(true);
       setLastPanPosition({ x: event.clientX, y: event.clientY });
       event.preventDefault();
@@ -403,25 +429,43 @@ export default function STLToDrawingApp() {
   };
 
   const handleMouseMove = (event) => {
-    if (!isPanning) return;
-    
     const canvas = canvasRef.current;
     const rect = canvas.getBoundingClientRect();
-    const scaleX = canvas.width / rect.width;
-    const scaleY = canvas.height / rect.height;
-    
-    const deltaX = (event.clientX - lastPanPosition.x) * scaleX;
-    const deltaY = (event.clientY - lastPanPosition.y) * scaleY;
-    
-    setPanOffset({
-      x: panOffset.x + deltaX,
-      y: panOffset.y + deltaY
+
+    // View drag in progress — move all views together
+    if (draggingViewRef.current) {
+      const { x, y } = getCanvasCoordinates(event);
+      const { startX, startY, startOffsetX, startOffsetY } = draggingViewRef.current;
+      const dx = x - startX;
+      const dy = y - startY;
+      setDrawingOffset({ x: startOffsetX + dx, y: startOffsetY + dy });
+      return;
+    }
+
+    // Sheet pan in progress
+    if (isPanning) {
+      const scaleX = canvas.width / rect.width;
+      const scaleY = canvas.height / rect.height;
+      const deltaX = (event.clientX - lastPanPosition.x) * scaleX;
+      const deltaY = (event.clientY - lastPanPosition.y) * scaleY;
+      setPanOffset({ x: panOffset.x + deltaX, y: panOffset.y + deltaY });
+      setLastPanPosition({ x: event.clientX, y: event.clientY });
+      return;
+    }
+
+    // No drag — update cursor to hint at what's draggable
+    const { x, y } = getCanvasCoordinates(event);
+    const overView = ['front', 'top', 'sideRight', 'sideLeft'].some(vn => {
+      if (!views[vn]) return false;
+      const bbox = viewBBoxesRef.current[vn];
+      return bbox && x >= bbox.x && x <= bbox.x + bbox.w && y >= bbox.y && y <= bbox.y + bbox.h;
     });
-    
-    setLastPanPosition({ x: event.clientX, y: event.clientY });
+    canvas.style.cursor = overView ? 'move' : 'grab';
   };
 
   const handleMouseUp = () => {
+    draggingViewRef.current = null;
+    setIsDraggingView(false);
     setIsPanning(false);
   };
 
@@ -624,7 +668,7 @@ export default function STLToDrawingApp() {
     
     // Add label for projection type and A3 sheet size
     ctx.font = "12px Arial";
-    ctx.fillText(projectionType === "third" ? "Third Angle" : "First Angle", margin + 20, canvas.height - margin - 55);
+    ctx.fillText(projectionType === "first" ? "First Angle (ISO)" : "Third Angle (ASME)", margin + 20, canvas.height - margin - 55);
     ctx.fillText("Sheet: A3", margin + 150, canvas.height - margin - 30);
   };
 
@@ -639,8 +683,9 @@ export default function STLToDrawingApp() {
     // ── view direction (toward the viewer, in model space) ──────────────────
     // front: look along +Z
     // top:   look along +Y
-    // side:  look along +X
-    const vx = viewType === 'side' ? 1 : 0;
+    // sideRight: look along -X (right side of model)
+    // sideLeft:  look along +X (left side of model)
+    const vx = viewType === 'sideLeft' ? 1 : viewType === 'sideRight' ? -1 : 0;
     const vy = viewType === 'top'  ? 1 : 0;
     const vz = viewType === 'front' ? 1 : 0;
 
@@ -649,9 +694,10 @@ export default function STLToDrawingApp() {
 
     // Project a single 3-D point to 2-D canvas coords
     const project = (x, y, z) => {
-      if (viewType === 'front') return [centerX + (x - centerModelX) * scale, centerY - (y - centerModelY) * scale];
-      if (viewType === 'top')   return [centerX + (x - centerModelX) * scale, centerY - (z - centerModelZ) * scale];
-      /* side */                return [centerX + (z - centerModelZ) * scale, centerY - (y - centerModelY) * scale];
+      if (viewType === 'front')      return [centerX + (x - centerModelX) * scale, centerY - (y - centerModelY) * scale];
+      if (viewType === 'top')        return [centerX + (x - centerModelX) * scale, centerY - (z - centerModelZ) * scale];
+      if (viewType === 'sideRight')  return [centerX - (z - centerModelZ) * scale, centerY - (y - centerModelY) * scale];
+      /* sideLeft */                 return [centerX + (z - centerModelZ) * scale, centerY - (y - centerModelY) * scale];
     };
 
     // edge map: 3-D key → { p1, p2, normals[], faces[] }
@@ -1091,26 +1137,18 @@ export default function STLToDrawingApp() {
     const viewSpacing = 40;
     let viewWidth, viewHeight;
     
-    // Layout: Front view top-left, Top view below front, Side view to right of front
-    if (activeViews === 1) {
-      viewWidth = usableWidth;
-      viewHeight = usableHeight;
-    } else if (activeViews === 2) {
-      // Two views: arrange based on which ones are active
-      if (views.front && views.top) {
-        // Front above, top below
-        viewWidth = usableWidth;
-        viewHeight = (usableHeight - viewSpacing) / 2;
-      } else {
-        // Side by side
-        viewWidth = (usableWidth - viewSpacing) / 2;
-        viewHeight = usableHeight;
-      }
-    } else {
-      // Three views: 2x2 grid layout
-      viewWidth = (usableWidth - viewSpacing) / 2;
-      viewHeight = (usableHeight - viewSpacing) / 2;
-    }
+    // Layout sizing
+    // Third angle (ASME): top view ABOVE front, side-right to the RIGHT, side-left to the LEFT (beyond right)
+    // First angle (ISO):  top view BELOW front, side-right to the LEFT, side-left to the RIGHT (beyond left)
+    const isThird = projectionType === 'third';
+
+    // Auto-fit: calculate grid dimensions from the number of column/row slots needed
+    const numCols = (views.sideRight && views.sideLeft) ? 3
+                  : (views.sideRight || views.sideLeft) ? 2
+                  : 1;
+    const numRows = views.top ? 2 : 1;
+    viewWidth  = (usableWidth  - (numCols - 1) * viewSpacing) / numCols;
+    viewHeight = (usableHeight - (numRows - 1) * viewSpacing) / numRows;
 
     const maxDim = Math.max(width, height, depth);
     let scale;
@@ -1137,15 +1175,36 @@ export default function STLToDrawingApp() {
     if (rotatedGeom) {
       const bbox = rotatedGeom.boundingBox;
 
-      // Front View - Top Left
+      // Projection layout:
+      // First angle  (ISO): top BELOW front, right-side LEFT of front,  left-side RIGHT of front
+      // Third angle (ASME): top ABOVE front, right-side RIGHT of front, left-side LEFT  of front
+      //
+      // In third angle the front row is pushed down to make room for the top view above it.
+      const frontRowY = isThird ? startY + viewHeight + viewSpacing : startY;
+      const topRowY   = isThird ? startY : startY + viewHeight + viewSpacing;
+
+      // Shift front right if a view needs to sit to its left:
+      //   First angle: right-side sits LEFT → shift right if sideRight enabled
+      //   Third angle: left-side sits LEFT  → shift right if sideLeft  enabled
+      const needsLeftRoom = isThird ? views.sideLeft : views.sideRight;
+      const frontColX = startX + (needsLeftRoom ? viewWidth + viewSpacing : 0);
+
+      const rightSideColX = isThird
+        ? frontColX + viewWidth + viewSpacing   // right of front
+        : frontColX - viewWidth - viewSpacing;  // left  of front
+      const leftSideColX = isThird
+        ? frontColX - viewWidth - viewSpacing   // left  of front
+        : frontColX + viewWidth + viewSpacing;  // right of front
+
+      // Front View
       if (views.front) {
-        const posX = startX;
-        const posY = startY;
+        const posX = frontColX + drawingOffset.x;
+        const posY = frontRowY + drawingOffset.y;
+        viewBBoxesRef.current.front = { x: posX, y: posY, w: viewWidth, h: viewHeight };
         
         offscreenCtx.fillText("Front View (XY)", posX + viewWidth / 2 - 50, posY - 10);
         const { centerX, centerY } = drawProjection(offscreenCtx, rotatedGeom, bbox, 'front', posX, posY, viewWidth, viewHeight, scale);
         
-        // Dimensions for front view
         const rectW = width * scale;
         const rectH = height * scale;
         if (dimensions.width) {
@@ -1160,15 +1219,15 @@ export default function STLToDrawingApp() {
         }
       }
 
-      // Top View - Below Front View
+      // Top View
       if (views.top) {
-        const posX = startX;
-        const posY = startY + viewHeight + viewSpacing;
+        const posX = frontColX + drawingOffset.x;
+        const posY = topRowY + drawingOffset.y;
+        viewBBoxesRef.current.top = { x: posX, y: posY, w: viewWidth, h: viewHeight };
         
         offscreenCtx.fillText("Top View (XZ)", posX + viewWidth / 2 - 50, posY - 10);
         const { centerX, centerY } = drawProjection(offscreenCtx, rotatedGeom, bbox, 'top', posX, posY, viewWidth, viewHeight, scale);
         
-        // Dimensions for top view
         const rectW = width * scale;
         const rectD = depth * scale;
         if (dimensions.width) {
@@ -1183,15 +1242,38 @@ export default function STLToDrawingApp() {
         }
       }
 
-      // Side View - To the right of Front View
-      if (views.side) {
-        const posX = startX + viewWidth + viewSpacing;
-        const posY = startY;
+      // Right-Side View
+      if (views.sideRight) {
+        const posX = rightSideColX + drawingOffset.x;
+        const posY = frontRowY + drawingOffset.y;
+        viewBBoxesRef.current.sideRight = { x: posX, y: posY, w: viewWidth, h: viewHeight };
         
-        offscreenCtx.fillText("Side View (YZ)", posX + viewWidth / 2 - 50, posY - 10);
-        const { centerX, centerY } = drawProjection(offscreenCtx, rotatedGeom, bbox, 'side', posX, posY, viewWidth, viewHeight, scale);
+        offscreenCtx.fillText("Right Side (YZ)", posX + viewWidth / 2 - 50, posY - 10);
+        const { centerX, centerY } = drawProjection(offscreenCtx, rotatedGeom, bbox, 'sideRight', posX, posY, viewWidth, viewHeight, scale);
         
-        // Dimensions for side view
+        const rectD = depth * scale;
+        const rectH = height * scale;
+        if (dimensions.depth) {
+          offscreenCtx.fillText(`D: ${depth.toFixed(1)} mm`, centerX - rectD / 2, centerY + rectH / 2 + 20);
+        }
+        if (dimensions.height) {
+          offscreenCtx.save();
+          offscreenCtx.translate(centerX - rectD / 2 - 20, centerY);
+          offscreenCtx.rotate(-Math.PI / 2);
+          offscreenCtx.fillText(`H: ${height.toFixed(1)} mm`, 0, 0);
+          offscreenCtx.restore();
+        }
+      }
+
+      // Left-Side View
+      if (views.sideLeft) {
+        const posX = leftSideColX + drawingOffset.x;
+        const posY = frontRowY + drawingOffset.y;
+        viewBBoxesRef.current.sideLeft = { x: posX, y: posY, w: viewWidth, h: viewHeight };
+        
+        offscreenCtx.fillText("Left Side (YZ)", posX + viewWidth / 2 - 50, posY - 10);
+        const { centerX, centerY } = drawProjection(offscreenCtx, rotatedGeom, bbox, 'sideLeft', posX, posY, viewWidth, viewHeight, scale);
+        
         const rectD = depth * scale;
         const rectH = height * scale;
         if (dimensions.depth) {
@@ -1209,7 +1291,10 @@ export default function STLToDrawingApp() {
     
     // Draw annotations on top of everything (if enabled)
     if (showAnnotations) {
+      offscreenCtx.save();
+      offscreenCtx.translate(drawingOffset.x, drawingOffset.y);
       drawAnnotations(offscreenCtx);
+      offscreenCtx.restore();
     }
     
     // Now draw the offscreen canvas to the main canvas with zoom and pan
@@ -1261,7 +1346,7 @@ export default function STLToDrawingApp() {
             <div>
               <p className="text-sm font-semibold mb-2">Views:</p>
               <div className="space-y-1">
-                {[['front', 'Front View (XY)'], ['top', 'Top View (XZ)'], ['side', 'Side View (YZ)']].map(([key, label]) => (
+                {[['front', 'Front View (XY)'], ['top', 'Top View (XZ)'], ['sideRight', 'Right Side View'], ['sideLeft', 'Left Side View']].map(([key, label]) => (
                   <label key={key} className="flex items-center gap-2 text-sm">
                     <Checkbox
                       checked={views[key]}
@@ -1337,15 +1422,24 @@ export default function STLToDrawingApp() {
                   <div key={axis} className="flex items-center gap-2">
                     <span className="text-xs font-mono w-4">{axis.toUpperCase()}</span>
                     <input
-                      type="range"
+                      type="number"
                       min="-180"
                       max="180"
                       step="1"
                       value={rotation[axis]}
-                      onChange={(e) => setRotation({ ...rotation, [axis]: parseInt(e.target.value) })}
-                      className="flex-1"
+                      onChange={(e) => {
+                        const v = parseInt(e.target.value);
+                        if (!isNaN(v)) setRotation({ ...rotation, [axis]: Math.max(-180, Math.min(180, v)) });
+                      }}
+                      onWheel={(e) => {
+                        e.preventDefault();
+                        const delta = e.deltaY < 0 ? 1 : -1;
+                        setRotation(prev => ({ ...prev, [axis]: Math.max(-180, Math.min(180, prev[axis] + delta)) }));
+                      }}
+                      className="flex-1 border rounded px-2 py-1 text-xs text-right tabular-nums w-0"
+                      style={{ minWidth: 0 }}
                     />
-                    <span className="text-xs w-10 text-right tabular-nums">{rotation[axis]}&deg;</span>
+                    <span className="text-xs text-gray-400">&deg;</span>
                   </div>
                 ))}
                 <Button
@@ -1368,6 +1462,14 @@ export default function STLToDrawingApp() {
                 <Button onClick={handleZoomReset} variant="outline" size="sm">&#8635;</Button>
               </div>
               <p className="text-xs text-gray-400">Zoom: {Math.round(zoom * 100)}% &middot; scroll or drag</p>
+              <Button
+                className="w-full mt-1"
+                variant="outline"
+                size="sm"
+                onClick={() => setDrawingOffset({ x: 0, y: 0 })}
+              >
+                Reset View Positions
+              </Button>
             </div>
 
             <div>
@@ -1439,7 +1541,7 @@ export default function STLToDrawingApp() {
             <div>
               <p className="text-sm font-semibold mb-2">Projection:</p>
               <div className="space-y-1">
-                {[['third', 'Third-Angle (US/ISO)'], ['first', 'First-Angle (European)']].map(([type, label]) => (
+                {[['first', 'First Angle — ISO (Europe/UK)'], ['third', 'Third Angle — ASME (USA/Canada)']].map(([type, label]) => (
                   <label key={type} className="flex items-center gap-2 text-sm cursor-pointer">
                     <input
                       type="radio"
@@ -1514,7 +1616,7 @@ export default function STLToDrawingApp() {
               className="border shadow-lg mx-auto block"
               style={{
                 imageRendering: 'crisp-edges',
-                cursor: currentTool !== 'none' ? 'crosshair' : isPanning ? 'grabbing' : 'grab',
+                cursor: currentTool !== 'none' ? 'crosshair' : (isPanning || isDraggingView) ? 'grabbing' : 'grab',
                 width: '100%',
                 height: 'auto',
               }}

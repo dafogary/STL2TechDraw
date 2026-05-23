@@ -5,14 +5,15 @@ A web application for converting STL 3D models into professional technical drawi
 ## Features
 
 - 📂 Upload and parse STL files
-- 🎨 Multiple view projections (Front, Top, Side)
-- 🔄 First and Third angle projection support
+- 🎨 Multiple view projections (Front, Top, Right Side, Left Side)
+- 🔄 First Angle — ISO (Europe/UK) and Third Angle — ASME (USA/Canada) projection support
 - 📐 Automatic feature detection (circles, holes, dimensions)
 - ✏️ Manual annotation tools (dimensions, radius, angles, text)
 - 🔍 Zoom and pan controls
+- 🖱️ Draggable drawing canvas
 - 📏 Manual and auto-scaling options
 - 📥 Export to PNG, PDF, and SVG formats
-- 📄 Professional A3 title block with drawing information
+- 📄 Professional A3 title block with drawing information and projection symbol
 
 ## Prerequisites
 
@@ -172,6 +173,17 @@ export default defineConfig({
 ## License
 
 AGPL-3.0-or-later
+
+## Changelog
+
+### v0.1.1
+- **Right Side & Left Side Views** — Added independent checkboxes to enable a Right Side View (looking from −X) and a Left Side View (looking from +X), in addition to the existing Front and Top views.
+- **Auto-fit layout** — The drawing area now automatically calculates column and row counts from the active views (up to 3 columns when both side views are enabled) so all views always fit within the page border without overlap.
+- **Correct projection placement** — First Angle (ISO): right-side sits left of front, left-side sits right of front. Third Angle (ASME): right-side sits right of front, left-side sits left of front.
+- **Draggable views** — All views move together as a single drawing via a unified offset, keeping relative positions consistent.
+- **Projection standard labels** — Title block and UI updated to show "First Angle (ISO)" and "Third Angle (ASME)" with regional sub-labels (Europe/UK and USA/Canada).
+- **Rotation inputs** — Model rotation fields support mouse-wheel scrolling in addition to typing.
+- **Body margin** — Added 10 px page margin for a less cramped layout.
 
 ## Contributing
 
